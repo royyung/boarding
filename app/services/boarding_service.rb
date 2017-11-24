@@ -1,9 +1,14 @@
 require "spaceship"
+require "net/imap"
+require "mail"
+# require "gmail"
 
 class AddTesterResponse
   attr_accessor :message
   attr_accessor :type
-end  
+  attr_accessor :url
+  attr_accessor :mail_body
+end
 
 class BoardingService
   include AbstractController::Translation
@@ -21,10 +26,15 @@ class BoardingService
   def initialize(app_id: ENV["ITC_APP_ID"],
                    user: ENV["ITC_USER"] || ENV["FASTLANE_USER"],
                password: ENV["ITC_PASSWORD"] || ENV["FASTLANE_PASSWORD"],
-     tester_group_names: ENV["ITC_APP_TESTER_GROUPS"])
+     tester_group_names: ENV["ITC_APP_TESTER_GROUPS"],
+         gmail_username: ENV["GMAIL_USERNAME"],
+         gmail_password: ENV["GMAIL_PASSWORD"]
+           )
     @app_id = app_id
     @user = user
     @password = password
+    @gmail_username = gmail_username # in format of name, @gmail.com is not necessary
+    @gmail_password = gmail_password
 
     groups = tester_group_names.to_s.split(/\s*,\s*/)
     @tester_group_names = groups unless groups.empty?
@@ -41,22 +51,31 @@ class BoardingService
     add_tester_response = AddTesterResponse.new
     add_tester_response.type = "danger"
 
-    tester = find_app_tester(email: email, app: app)
+    dynamic_gmail = @gmail_username + '+' + email.gsub(/[@.]/, '@' => '_', '.' => '_') + '@gmail.com'
+    Rails.logger.info "dynamic gmail is: #{dynamic_gmail}"
+
+    tester = find_app_tester(email: dynamic_gmail, app: app)
+    imap_user = imap_login(gmail_username: @gmail_username, gmail_password: @gmail_password)
     if tester
       add_tester_response.message = t(:message_email_exists)
     else
-      tester = create_tester(
-        email: email,
-        first_name: first_name,
-        last_name: last_name,
-        app: app
-      )
-      if true || testing_is_live? # TODO: remove true and test new train system
-        add_tester_response.message = t(:message_success_live)
+      if imap_user
+        tester = create_tester(
+          email: dynamic_gmail,
+          first_name: first_name,
+          last_name: last_name,
+          app: app
+        )
+        if true || testing_is_live? # TODO: remove true and test new train system
+          # add_tester_response.message = t(:message_success_live)
+          add_tester_response.message = "Successfully added you as a tester."
+        else
+          add_tester_response.message = t(:message_success_pending)
+        end
+        add_tester_response.type = "success"
       else
-        add_tester_response.message = t(:message_success_pending)
+        add_tester_response.message = "Authentication failed."
       end
-      add_tester_response.type = "success"
     end
 
     begin
@@ -73,6 +92,16 @@ class BoardingService
       raise ex
     end
 
+    # read gmail message
+    begin
+      message = read_mail(gmail_username: @gmail_username, gmail_password: @gmail_password, dyn_gmail: dynamic_gmail)
+      Rails.logger.info "Message is: #{message}"
+      add_tester_response.url = message
+    rescue => ex
+      Rails.logger.error "The TestFlight message cannot be shown."
+      raise ex
+    end
+
     return add_tester_response
   end
 
@@ -80,12 +109,14 @@ class BoardingService
 
     def create_tester(email: nil, first_name: nil, last_name: nil, app: nil)
       current_user = Spaceship::Members.find(Spaceship::Tunes.client.user)
+      Rails.logger.info "Current User is: #{current_user}"
       if current_user.admin? || current_user.app_manager?
         Spaceship::TestFlight::Tester.create_app_level_tester(app_id: app.apple_id,
                                                           first_name: first_name,
                                                            last_name: last_name,
                                                                email: email)
         tester = Spaceship::TestFlight::Tester.find(app_id: app.apple_id, email: email)
+        Rails.logger.info "Current Tester is: #{tester}"
         Rails.logger.info "Successfully added tester: #{email} to app: #{app.name}"
       else
         raise "Current account doesn't have permission to create a tester"
@@ -126,7 +157,7 @@ class BoardingService
       spaceship = Spaceship::Tunes.login(@user, @password)
       spaceship.select_team
 
-      @app ||= Spaceship::Tunes::Application.find(@app_id)      
+      @app ||= Spaceship::Tunes::Application.find(@app_id)
       raise "Could not find app with ID #{app_id}" if @app.nil?
 
       if tester_group_names
@@ -153,4 +184,40 @@ class BoardingService
       end
       return false
     end
+
+    # to authenticate the gmail accout
+    def imap_login(gmail_username: nil, gmail_password: nil)
+      gmail_account = gmail_username + "@gmail.com"
+      imap = Net::IMAP.new('imap.gmail.com', 993, true)
+      begin
+        imap.login(gmail_account, gmail_password)
+      rescue
+        Rails.logger.error "Authentication failed"
+        return nil
+      end
+    end
+
+    def read_mail(gmail_username: nil, gmail_password: nil, dyn_gmail: nil)
+      folder = "INBOX"
+      gmail_account = gmail_username + "@gmail.com"
+
+      sleep(15) # wait until the message is delivered
+      imap = Net::IMAP.new('imap.gmail.com', 993, true)
+      imap.login(gmail_account, gmail_password)
+      imap.select(folder)
+
+      start = "https://beta.itunes.apple.com"
+      last_char = "'"
+      beta_url = ""
+
+      imap.search(["TO", dyn_gmail]).each do |msg_id|
+        msg = imap.fetch(msg_id, "(UID RFC822.SIZE ENVELOPE BODY[TEXT])")[0]
+        body = msg.attr["BODY[TEXT]"]
+
+        beta_url = body[/#{start}(.*?)#{last_char}/m, 1]
+      end
+
+      return start + '/' + beta_url.unpack('M')[0]
+    end
+
 end

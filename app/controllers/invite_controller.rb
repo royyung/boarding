@@ -29,7 +29,7 @@ class InviteController < ApplicationController
       render :index
       return
     end
-    
+
     email = params[:email]
     first_name = params[:first_name]
     last_name = params[:last_name]
@@ -56,7 +56,7 @@ class InviteController < ApplicationController
         return
       end
     end
-    
+
     if email.length == 0
       render :index
       return
@@ -92,6 +92,7 @@ class InviteController < ApplicationController
       add_tester_response = boarding_service.add_tester(email, first_name, last_name)
       @message = add_tester_response.message
       @type = add_tester_response.type
+      @url = add_tester_response.url
     end
 
     def boarding_service
